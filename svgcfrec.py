@@ -73,6 +73,8 @@ def updatePath(layer, paths, curveNumbers, groupID):
     #  layer.remove(g)
    return True
 
+def valid(flippedPaths):
+   return true
 
 def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
                                     wedgeNrOffset, dist, lines):#, lineidx):
@@ -140,7 +142,10 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
 				badTriple = True
 				break
 
+      
       if badTriple == True: continue
+
+      
 
       #print paths
 
@@ -161,10 +166,7 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
    return wedgeNrOffset, idx, maxCurveDist
 
 def getPoints(pathNode):
-   #if re.compile(r'[HhVv]').findall(pathNode.get("d")): return np.array([])
-
    it = re.finditer('([MmCcSsLl])([^A-Za-z]+)',pathNode.get("d").replace("-"," -"))
-
    cOffset = [0.0,0.0]
    points = []
    for m in it:
@@ -172,24 +174,22 @@ def getPoints(pathNode):
       pts = re.split(' |,', m.group(2).strip())
       if char == "M":
          if len(pts)%2 != 0: return np.array([])
-         pt = [float(pts[0]),float(pts[1])]
-         points.append(pt)
+         cOffset = [float(pts[0]),float(pts[1])]
+         points.append(cOffset)
          for i in range(2, len(points),2):
-            pt = [float(pts[i]),float(pts[i+1])]
-            points.append(pt)
-            points.append(pt)
-            points.append(pt)
-         cOffset = pt
+            cOffset = [float(pts[i]),float(pts[i+1])]
+            points.append(cOffset)
+            points.append(cOffset)
+            points.append(cOffset)
       elif char == "m":
          if len(pts)%2 != 0: return np.array([])
-         pt = [float(pts[0]),float(pts[1])]
-         points.append(pt)
-         for i in range(2, len(points),2):
-            pt = [float(pts[i])+pt[0],float(pts[i+1])+pt[1]]
-            points.append(pt)
-            points.append(pt)
-            points.append(pt)
-         cOffset = pt
+         cOffset = [float(pts[0]),float(pts[1])]
+         points.append(cOffset)
+         for i in range(2,len(points),2):
+            cOffset = [float(pts[i])+cOffset[0],float(pts[i+1])+cOffset[1]]
+            points.append(cOffset)
+            points.append(cOffset)
+            points.append(cOffset)
       elif char == "C":
          if len(pts)%6 != 0: return np.array([])
          for i in range(0,len(pts),2):
@@ -202,40 +202,47 @@ def getPoints(pathNode):
             if i%3 == 1: cOffset = pt
       elif char == "S":
          if len(pts)%4 != 0: return np.array([])
-         points.append(points(len(points)-1)-points(len(points)-2))
          for i in range(0,len(pts),2):
-            points.append([float(pts[i]),float(pts[i+1])])
+            pt = [float(pts[i]),float(pts[i+1])]
+            if i%2 == 0:
+               points.append(np.add(np.subtract(points[len(points)-1],points[len(points)-2]),points[len(points)-1]))
+               points.append(pt)
+            else:
+               points.append(pt)
+               cOffset = pt
       elif char == "s":
          if len(pts)%4 != 0: return np.array([])
-         points.append(points(len(points)-1)-points(len(points)-2))
+         points.append(np.add(np.subtract(points[len(points)-1],points[len(points)-2]),points[len(points)-1]))
          for i in range(0,len(pts),2):
             pt = [float(pts[i])+cOffset[0],float(pts[i+1])+cOffset[1]]
-            points.append(pt)
-            if i%2 == 1: cOffset = pt
+            if i%2 == 0:
+               points.append(np.add(np.subtract(points[len(points)-1],points[len(points)-2]),points[len(points)-1]))
+               points.append(pt)
+            else:
+               points.append(pt)
+               cOffset = pt
       elif char == "L":
+         print pathNode
          if len(pts)%2 != 0: return np.array([])
-         pathOffset = [float(pts[0]),float(pts[1])]
-         points.append(pathOffset)
          for i in range(0, len(points),2):
-				pt = [float(pts[i]),float(pts[i+1])]
-				points.append(pt)
-				points.append(pt)
-				points.append(pt)
-         cOffset = pt
+            cOffset = [float(pts[i]),float(pts[i+1])]
+            points.append(cOffset)
+            points.append(cOffset)
+            points.append(cOffset)
+         
       elif char == "l":
          if len(pts)%2 != 0: return np.array([])
          for i in range(0, len(points),2):
-				pt = [float(pts[i])+pt[0],float(pts[i+1])+pt[1]]
-				points.append(pt)
-				points.append(pt)
-				points.append(pt)
-         cOffset = pt
+            cOffset = [float(pts[i])+cOffset[0],float(pts[i+1])+cOffset[1]]
+            points.append(cOffset)
+            points.append(cOffset)
+            points.append(cOffset)
       else: return np.array([])
 
    return np.array(points, dtype=floatType)
 
 
-def thinOut2(points):
+def thinOutOld(points):
    #print points.shape
    #pts = np.vstack((points,points[::3],points[::3],points[::3]))
    #print pts.shape worse
@@ -253,6 +260,30 @@ def thinOut2(points):
    if len(res) == 4: return res
    return None
 
+def thinOut(points):
+   #print points.shape
+   #pts = np.vstack((points,points[::3],points[::3],points[::3]))
+   #print pts.shape worse
+   
+   ends = points[:3,:]
+
+   km = kmeans(points-points[0,:],4)
+
+   
+   
+   #print km[0]
+   dist = squareform(pdist(km[0]))
+   order = []
+   cost = []
+   for i in itertools.permutations(range(len(km[0]))):
+      ind = np.array(i)
+      order.append(ind)
+      cost.append(np.sum(dist[ind[:len(ind)-1],ind[1:]],axis=0))
+   res = np.array(km[0]+points[0,:])[order[np.argmin(cost)],:]
+   if len(res) == 3: return np.vstack((res[:2,:],res[1:]))
+   if len(res) == 4: return res
+   return None
+   
 def transform(points, transformation):
    if transformation == None: return points
    m = re.match(r"(?P<method>\w+)\(\s*(?P<args>[^)]*)\)", transformation)
@@ -271,7 +302,7 @@ def adjust(points, transformation):
    if len(points) != 0:
       points = transform(points, transformation)
       if len(points) == 4:       return points
-      elif options.polybezier:   return thinOut2(points)
+      elif options.polybezier:   return thinOut(points)
    return None
 
 
@@ -547,8 +578,8 @@ if __name__ == '__main__':
             print "Program aborting..."
             sys.exit(0)
 
-        #debug(layer)
-        update(layer)
+        debug(layer)
+        #update(layer)
 
         if options.verbose: print "Writing result to: ", options.outputfile, "\n"
         tree.write(options.outputfile)
@@ -561,3 +592,15 @@ if __name__ == '__main__':
         raise e
     except SystemExit, e:
         raise e
+
+"""
+python svgcfrec.py VAT_10908_Vs.svg -v -l Kopie
+python svgcfrec.py VAT_10321_Vs_SJakob.svg -v -l Autographie
+python svgcfrec.py VAT_09671_Rs_SJakob.svg -v -l Autographie
+python svgcfrec.py VAT_09898+10964_Vs_SJakob.svg -v -l Autographie
+python svgcfrec.py VAT_10321_Vs_SJakob.svg -v -l Autographie
+python svgcfrec.py VAT_11022_SJakob.svg -v -l Autographie
+python svgcfrec.py VAT_10622_HPSchaudig.svg -v -l g20
+python svgcfrec.py VAT_10686+Obv_HPSchaudig.svg -v -l g20
+python svgcfrec.py VAT_10833-SeiteB_HPSchaudig.svg -v -l g20
+""" 
