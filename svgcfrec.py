@@ -5,12 +5,13 @@ import numpy as np
 from scipy.spatial.distance import pdist, squareform, cdist
 from scipy.optimize import minimize
 import collections as col
-from itertools import combinations, imap, ifilter, permutations, takewhile, dropwhile, groupby
+from itertools import combinations, imap, ifilter, permutations, takewhile, dropwhile, groupby, chain
 import itertools
 from pylab import plot,show
 import warnings
 from scipy.cluster.vq import vq, kmeans, whiten
 from scipy.misc import comb
+import operator
 
 def cubicBezier(points, t):
    xPoints = np.array([p[0] for p in points])
@@ -94,18 +95,52 @@ def curveLineIntersections(bezier, line):
    ts = [x.real for x in np.roots([A,B,C,D]) if x.imag<1e-8]
    return np.column_stack((np.polyval([a[0],b[0],c[0],d[0]], ts),np.polyval([a[1],b[1],c[1],d[1]], ts)))
 
-
-def valid(flippedPaths, gapSize):
+def numMergingEnds(flippedPaths, gapSize):
+   merging = []
    lines = flippedPaths[:,::3,:]
-   for i in range(3):
+   for i in range(len(flippedPaths)):
+      merging.append(min([np.linalg.norm(x-lines[i-1,1,:]) for x in curveLineIntersections(flippedPaths[i,:,:],lines[i-1,:,:])] \
+                     + [np.linalg.norm(x-lines[i,0,:]) for x in curveLineIntersections(flippedPaths[i-1,:,:],lines[i,:,:])]) \
+                     < gapSize)
+   return len(filter(lambda x: x, merging))
+
+def validOld(flippedPaths, gapSize):
+   lines = flippedPaths[:,::3,:]
+   for i in range(len(flippedPaths)):
       line2isecDists = [np.linalg.norm(x-lines[i-1,1,:]) for x in curveLineIntersections(flippedPaths[i,:,:],lines[i-1,:,:])] \
                         + [np.linalg.norm(x-lines[i,0,:]) for x in curveLineIntersections(flippedPaths[i-1,:,:],lines[i,:,:])]
       if len(line2isecDists) ==0 or min(line2isecDists) > gapSize: return False
    return True
 
+def valid(flippedPaths, gapSize):
+   return numMergingEnds(flippedPaths, gapSize) == 3
+
 def evalLine(start, end, n):
    return np.vstack(map(lambda i: start + (i/(n-1.0))*(end-start),range(n)))
-   
+
+"""
+for two adjoining curves from the points where they meet
+choose the point further from midpoint
+"""
+def mergeEnds(paths, midpoint):
+   for (i,j) in [(k-1,k) for k in range(len(paths))]:
+      di = np.linalg.norm(midpoint - paths[i,3,:])
+      dj = np.linalg.norm(midpoint - paths[j,0,:])
+      if di > dj:
+         if abs(di-dj) > 1.0:
+            curve = np.vstack(map(lambda t: cubicBezier(paths[j],t), np.linspace(1.0, 0.0,10)))
+            line = evalLine(paths[i,3,:],paths[j,0,:],4)
+            paths[j,:,:] = bezierFit(np.vstack((line,curve[1:])))
+         else: 
+            paths[j,0,:] = paths[i,3,:]
+      else:
+         if abs(di-dj) > 1.0:
+            curve = np.vstack(map(lambda t: cubicBezier(paths[i],t), np.linspace(1.0, 0.0,4)))
+            line = evalLine(paths[i,3,:],paths[j,0,:],4)
+            paths[i,:,:] = bezierFit(np.vstack((curve[:-1],line)))
+         else:  paths[i,3,:] = paths[j,0,:]
+   return paths
+
 def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
                                     wedgeNrOffset, dist, lines):#, lineidx):
    # calculate one path for each group of three paths,
@@ -156,38 +191,7 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
 
       if valid(paths,2.0) == False: continue
       
-      # for two adjoining curves from the points where they meet
-      # choose the point further from midpoint
-      badTriple = False
-      for (i,j) in [(0,1), (1,2), (2,0)]:
-         s1 = midpoint - paths[i,3,:]
-         s2 = midpoint - paths[j,0,:]
-         if True:#getAngle(s1,s2) < allowedAngle: # leave in?
-            di = np.linalg.norm(s1)
-            dj = np.linalg.norm(s2)
-            if di > dj:
-               if abs(di-dj) > 1.0:
-                  curve = np.vstack(map(lambda t: cubicBezier(paths[j],t), np.linspace(1.0, 0.0,10)))
-                  line = evalLine(paths[i,3,:],paths[j,0,:],4)
-                  paths[j,:,:] = bezierFit(np.vstack((line,curve[1:])))
-               else: 
-                  paths[j,0,:] = paths[i,3,:]
-            else:
-               if abs(di-dj) > 1.0:
-                  curve = np.vstack(map(lambda t: cubicBezier(paths[i],t), np.linspace(1.0, 0.0,4)))
-                  line = evalLine(paths[i,3,:],paths[j,0,:],4)
-                  paths[i,:,:] = bezierFit(np.vstack((curve[:-1],line)))
-               else:  paths[i,3,:] = paths[j,0,:]
-         else:
-            badTriple = True
-            break
-
-      if badTriple == True: continue
-
-      #print paths
-      #print valid(paths,1.0)
-      #if valid(paths,1.0) == False: continue
-
+      paths = mergeEnds(paths, midpoint)
       
       if options.extension:
          findExtension(paths,lines,midpoint)
@@ -544,9 +548,14 @@ def update(layer):
       if cfnrOld != cfnr:
          if options.verbose: print cfnr, "cuneiforms found after run", run
          run = run + 1
+         print run, maxCurveDist
          maxCurveDist = max(maxCurveDist,maxD)
+         
+         print maxCurveDist
+         #sys.exit()
          cfnrOld = cfnr
       else: break
+      #sys.exit()
 
    if options.verbose:
       print "\n", len(idx), "curves left"
@@ -557,12 +566,19 @@ def update(layer):
    # the pairs in the cuneiforms already found
 
    #"""
+   dnew = dist[idx,:][:,idx]
+   #print maxCurveDist
+   #sys.exit()
    closePoints = filter(lambda x: x[0]<x[1], np.array(np.where(dist[idx,:][:,idx] < maxCurveDist)).T)
-
-   #print closePoints
+   #print closePoints[:10]
+   #print dist[idx,:][:,idx]
+   #print set(map(tuple, chain(map(lambda i: combinations([j for j in idx if dist[i,j]< maxCurveDist],3),idx))))[:50]
+   closest = np.argsort(dist[idx,:][:,idx])
+   #print col.Counter([tuple(x) for x in chain(map(lambda i: combinations([j for j in idx if  j>=i and dist[i,j]< 10],3),idx))])
+   #print list(reduce(operator.add, (map(lambda i: map(list, combinations([j for j in idx if  j>=i and dist[i,j]< 10],3)),idx))))
    #sys.exit()
    
-   print maxCurveDist, len(closePoints)
+   #print maxCurveDist, len(closePoints)
    k=0
    pairings = [[] for i in range(len(idx))]
    for pair in closePoints:
@@ -576,11 +592,14 @@ def update(layer):
       c[1,0] = getAngle(slope[0][0],slope[1][0])
       c[1,1] = getAngle(slope[0][0],slope[1][1])
 
+      
       #print paths
 
       flip = np.unravel_index(np.argmin(c),c.shape)
 
       if angleTooWide(np.min(c),1.0): continue
+
+      
 
       k = k+1
       pairings[pair[0]].append(pair[1])
