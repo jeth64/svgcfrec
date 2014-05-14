@@ -12,6 +12,14 @@ import warnings
 from scipy.cluster.vq import vq, kmeans, whiten
 from scipy.misc import comb
 
+def cubicBezier(points, t):
+   xPoints = np.array([p[0] for p in points])
+   yPoints = np.array([p[1] for p in points])
+   polynomial_array = np.array([comb(3, i) * t**(3-i) * (1 - t)**i for i in range(0, 4)])
+   xvals = np.dot(xPoints, polynomial_array)
+   yvals = np.dot(yPoints, polynomial_array)
+   return np.column_stack((xvals,yvals))
+
 def getReferencePoint(points):
 	average = np.mean(points[:,1:3,:],axis=1)
 	try:
@@ -83,28 +91,21 @@ def curveLineIntersections(bezier, line):
    B = (line[1,1]-line[0,1])*b[0] + (line[0,0]-line[1,0])*b[1]
    C = (line[1,1]-line[0,1])*c[0] + (line[0,0]-line[1,0])*c[1]
    D = (line[1,1]-line[0,1])*(d[0]-line[0,0]) + (line[0,0]-line[1,0])*(d[1]-line[0,1])
-   ts = np.roots([A,B,C,D])
-   #print ts
-   #print a,b,c,d
-   #print np.column_stack((np.polyval([a[0],b[0],c[0],d[0]], ts),np.polyval([a[1],b[1],c[1],d[1]], ts)))
-   #sys.exit()
+   ts = [x.real for x in np.roots([A,B,C,D]) if x.imag<1e-8]
    return np.column_stack((np.polyval([a[0],b[0],c[0],d[0]], ts),np.polyval([a[1],b[1],c[1],d[1]], ts)))
+
 
 def valid(flippedPaths, gapSize):
    lines = flippedPaths[:,::3,:]
    for i in range(3):
-      print i
-      print flippedPaths[i-1,:,:]
-      print flippedPaths[i,:,:]
-      print "1. gap", [np.linalg.norm(x-lines[i-1,1,:]) for x in curveLineIntersections(flippedPaths[i,:,:],lines[i-1,:,:])]
-      print "2. gap",[np.linalg.norm(x-lines[i,0,:]) for x in curveLineIntersections(flippedPaths[i-1,:,:],lines[i,:,:])]
-      
-      if min([np.linalg.norm(x-lines[i-1,1,:]) for x in curveLineIntersections(flippedPaths[i,:,:],lines[i-1,:,:])]) \
-         and min([np.linalg.norm(x-lines[i,0,:]) for x in curveLineIntersections(flippedPaths[i-1,:,:],lines[i,:,:])]) \
-         > gapSize:
-         return False
+      line2isecDists = [np.linalg.norm(x-lines[i-1,1,:]) for x in curveLineIntersections(flippedPaths[i,:,:],lines[i-1,:,:])] \
+                        + [np.linalg.norm(x-lines[i,0,:]) for x in curveLineIntersections(flippedPaths[i-1,:,:],lines[i,:,:])]
+      if len(line2isecDists) ==0 or min(line2isecDists) > gapSize: return False
    return True
 
+def evalLine(start, end, n):
+   return np.vstack(map(lambda i: start + (i/(n-1.0))*(end-start),range(n)))
+   
 def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
                                     wedgeNrOffset, dist, lines):#, lineidx):
    # calculate one path for each group of three paths,
@@ -153,11 +154,10 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
             paths[i,:,:] = np.flipud(paths[i,:,:])
             dx[i,:] = np.flipud(dx[i,:])
 
-      if valid(paths,1.0) == False: continue
+      if valid(paths,2.0) == False: continue
       
       # for two adjoining curves from the points where they meet
       # choose the point further from midpoint
-      # (the derivatives should not change in the process)
       badTriple = False
       for (i,j) in [(0,1), (1,2), (2,0)]:
          s1 = midpoint - paths[i,3,:]
@@ -166,17 +166,26 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
             di = np.linalg.norm(s1)
             dj = np.linalg.norm(s2)
             if di > dj:
-               paths[j,0,:] = paths[i,3,:]
+               if abs(di-dj) > 1.0:
+                  curve = np.vstack(map(lambda t: cubicBezier(paths[j],t), np.linspace(1.0, 0.0,10)))
+                  line = evalLine(paths[i,3,:],paths[j,0,:],4)
+                  paths[j,:,:] = bezierFit(np.vstack((line,curve[1:])))
+               else: 
+                  paths[j,0,:] = paths[i,3,:]
             else:
-               paths[i,3,:] = paths[j,0,:]
+               if abs(di-dj) > 1.0:
+                  curve = np.vstack(map(lambda t: cubicBezier(paths[i],t), np.linspace(1.0, 0.0,4)))
+                  line = evalLine(paths[i,3,:],paths[j,0,:],4)
+                  paths[i,:,:] = bezierFit(np.vstack((curve[:-1],line)))
+               else:  paths[i,3,:] = paths[j,0,:]
          else:
             badTriple = True
             break
 
       if badTriple == True: continue
 
-      print paths
-      print valid(paths,1.0)
+      #print paths
+      #print valid(paths,1.0)
       #if valid(paths,1.0) == False: continue
 
       
@@ -266,39 +275,22 @@ def getPoints(pathNode):
       else: return np.array([])
    return np.array(points, dtype=floatType)
 
-
-def cubicBezier(points, t):
-   xPoints = np.array([p[0] for p in points])
-   yPoints = np.array([p[1] for p in points])
-   polynomial_array = np.array([comb(3, i) * t**(3-i) * (1 - t)**i for i in range(0, 4)])
-   xvals = np.dot(xPoints, polynomial_array)
-   yvals = np.dot(yPoints, polynomial_array)
-   return np.column_stack((xvals,yvals))
-
 """
 Fit ordered points to a cubic bezier using least squares method
 Takes n*3+1 points, returns 4
 """
-def bezierFit(pts, p0, p2):
-   pathlengths = [np.linalg.norm(p0-pts[0])]
+def bezierFit(pts):
+   pathlengths = [0.0]
    for i in range(len(pts)-1):
       pathlengths.append(pathlengths[i] + np.linalg.norm(pts[i,:]-pts[i+1,:]))
-   pathlengths.append(pathlengths[-1] + np.linalg.norm(pts[-1,:]-p2))
-   ts = [0]
-   ts.extend(map(lambda x: x / pathlengths[-1], pathlengths))
-   y = np.vstack((p0,pts,p2))
+   ts = map(lambda x: x / pathlengths[-1], pathlengths)
    x0 = np.array(map(lambda t: (1.0-t)**3, ts ))
    x1 = np.array(map(lambda t: 3*(1.0-t)**2*t, ts ))
    x2 = np.array(map(lambda t: 3*(1.0-t)*t**2, ts ))
    x3 = np.array(map(lambda t: t**3, ts ))
    X = np.column_stack((x0,x1,x2,x3))
-   Cs = np.dot(np.linalg.inv(np.dot(X.T,X)), np.dot(X.T,y))
+   Cs = np.dot(np.linalg.inv(np.dot(X.T,X)), np.dot(X.T,pts))
    return Cs
-
-def findEnds(pts):
-   first = np.mean(filter(lambda x: np.linalg.norm(pts[0]-x)<0.51, pts), axis=0)
-   last = np.mean(filter(lambda x: np.linalg.norm(pts[np.argmax(cdist(pts, [first]))]-x)<0.51, pts), axis=0)
-   return [first, last]
 
 def separator(first, last, p, sw):
    if np.linalg.norm(first-p) < sw:
@@ -326,21 +318,24 @@ def thinOut(points):
       order = order + str(k)
       pts.append(np.array(list(l)))
 
+   #sys.exit()
    if order == '02': # line
       p0 = np.mean(pts[0],axis=0)
       p2 = np.mean(pts[1],axis=0)
-      controlPoints = np.array([p0, p0, p2, p2])
+      controlPoints = np.vstack((p0, p0, p2, p2))
    if order == '012':
-      controlPoints = bezierFit(pts[1], np.mean(pts[0],axis=0), np.mean(pts[2],axis=0))
+      curve = np.vstack((np.mean(pts[0],axis=0),pts[1], np.mean(pts[2],axis=0)))
+      controlPoints = bezierFit(curve)
    elif order == '0120':
-      controlPoints = bezierFit(pts[1], np.mean(np.vstack((pts[0],pts[3])),axis=0), np.mean(pts[2],axis=0))
+      curve = np.vstack(np.mean(np.vstack((pts[0],pts[3])),axis=0), pts[1],np.mean(pts[2],axis=0))
+      controlPoints = bezierFit(curve)
    elif order == '0121':
-      controlPointsA = bezierFit(pts[1], pts[0][-1,:], pts[2][0,:])
-      controlPointsB = bezierFit(pts[3][::-1], pts[0][0,:], pts[2][-1,:])
+      controlPointsA = bezierFit(np.vstack(pts[0][-1,:], pts[1], pts[2][0,:]))
+      controlPointsB = bezierFit(np.vstack(pts[0][0,:], pts[3][::-1], pts[2][-1,:]))
       controlPoints = np.mean([controlPointsA, controlPointsB],axis=0)
    elif order == '01210':
-      controlPointsA = bezierFit(pts[1], pts[0][-1,:], pts[2][0,:])
-      controlPointsB = bezierFit(pts[3][::-1], pts[4][0,:], pts[2][-1,:])
+      controlPointsA = bezierFit(np.vstack(pts[0][-1,:], pts[1], pts[2][0,:]))
+      controlPointsB = bezierFit(np.vstack(pts[4][0,:], pts[3][::-1], pts[2][-1,:]))
       controlPoints = np.mean([controlPointsA, controlPointsB],axis=0)
    else:
       return None
@@ -355,7 +350,6 @@ def transform(points, transformation):
       points[:,0] = points[:,0] + np.float(args[0])
       if len(args) == 2: points[:,1] = points[:,1] + np.float(args[1])
    else:
-      print "else"
       if options.verbose:
          print "Invalid transform operation", m.group('method')
          print "Using original points..."
@@ -478,6 +472,9 @@ def findExtension(paths, lines, midpoint):
    lineEdges = lines.reshape((len(lines)*2,2))
    #print paths
    (pCorner,lEdge) = np.where(cdist(pathCorners,lineEdges) < extensionDist)
+
+   print paths
+   print pathCorners
    for i in range(len(pCorner)):
       start = lEdge[i]%2
       angle = getAngle( midpoint - lines[lEdge[i]/2,1-start,:],
@@ -541,7 +538,7 @@ def update(layer):
       count = col.Counter([tuple(x) for x in np.sort(closest[:,:3])])
       cuneiforms = [k for (k, v) in count.items() if v==3]
 		# note: versuche alle tripel zu testen (itertools.combinations)
-      print len(cuneiforms)
+      #print len(cuneiforms)
       cfnr, idx, maxD = catPaths(absPoints, endSlopes, refPoints, cuneiforms, idx, cfnr, dist, lines)
 
       if cfnrOld != cfnr:
@@ -562,6 +559,9 @@ def update(layer):
    #"""
    closePoints = filter(lambda x: x[0]<x[1], np.array(np.where(dist[idx,:][:,idx] < maxCurveDist)).T)
 
+   #print closePoints
+   #sys.exit()
+   
    print maxCurveDist, len(closePoints)
    k=0
    pairings = [[] for i in range(len(idx))]
@@ -642,8 +642,8 @@ if __name__ == '__main__':
             print "Program aborting..."
             sys.exit(0)
 
-        debug(layer)
-        #update(layer)
+        #debug(layer)
+        update(layer)
 
         if options.verbose: print "Writing result to: ", options.outputfile, "\n"
         tree.write(options.outputfile)
