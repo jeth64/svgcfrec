@@ -5,7 +5,7 @@ import numpy as np
 from scipy.spatial.distance import pdist, squareform, cdist
 from scipy.optimize import minimize
 import collections as col
-from itertools import combinations, imap, ifilter, permutations, takewhile, dropwhile, groupby, chain
+from itertools import combinations, imap, ifilter, permutations, takewhile, dropwhile, groupby, chain, product
 import itertools
 from pylab import plot,show
 import warnings
@@ -135,11 +135,21 @@ def mergeEnds(paths, midpoint):
             paths[j,0,:] = paths[i,3,:]
       else:
          if abs(di-dj) > 1.0:
-            curve = np.vstack(map(lambda t: cubicBezier(paths[i],t), np.linspace(1.0, 0.0,4)))
+            curve = np.vstack(map(lambda t: cubicBezier(paths[i],t), np.linspace(1.0, 0.0,10)))
             line = evalLine(paths[i,3,:],paths[j,0,:],4)
             paths[i,:,:] = bezierFit(np.vstack((curve[:-1],line)))
          else:  paths[i,3,:] = paths[j,0,:]
    return paths
+
+"""
+determine of which curves the indices have to be flipped
+for melting the paths into one
+"""
+def flipCurves(paths):
+   func = lambda p: reduce(operator.add,[np.linalg.norm(p[k-1][3,:]-p[k][0,:]) for k in range(len(p))])
+   possibilities = map(lambda x: map(lambda a, b, c: b if a else c, x, paths, paths[:,::-1,:]), product([True, False], repeat=3))
+   return np.array(min(possibilities, key=func))
+
 
 def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
                                     wedgeNrOffset, dist, lines):#, lineidx):
@@ -156,39 +166,8 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
       with next triple, else calculate it
       """
 
-      # determine of which curves the indices have to be flipped
-      # for melting the paths into one
-      d = squareform(pdist(paths[:,::3,:].reshape(6,2)))
-      #i1 = range(0,6,2)
-      #i2 = range(1,6,2)
-      #d[i1+i2,i2+i1] = 0.0
-      #print d
-      #perm = []
-      #cost =[]
-      #for i in itertools.permutations(range(6),6):
-         #perm.append(i)
-         #cost.append(np.sum(d[i[1:],i[:-1]]))
-      #print cost
-      #print perm
-      #k = np.argmin(cost)
-      #print cost[k], perm[k]
-
-      c = np.empty((2,2,2))
-      c[0,0,0] = d[1,2]+d[3,4]+d[5,0]
-      c[0,0,1] = d[1,2]+d[3,5]+d[4,0]
-      c[0,1,0] = d[1,3]+d[2,4]+d[5,0]
-      c[0,1,1] = d[1,3]+d[2,5]+d[4,0]
-      c[1,0,0] = d[0,2]+d[3,4]+d[5,1]
-      c[1,0,1] = d[0,2]+d[3,5]+d[4,1]
-      c[1,1,0] = d[0,3]+d[2,4]+d[5,1]
-      c[1,1,1] = d[0,3]+d[2,5]+d[4,1]
-      flip = np.unravel_index(np.argmin(c),c.shape)
-      #sys.exit()
-      for i in range(3):
-         if flip[i] == 1:
-            paths[i,:,:] = np.flipud(paths[i,:,:])
-            dx[i,:] = np.flipud(dx[i,:])
-
+      paths = flipCurves(paths)
+      
       if valid(paths,2.0) == False: continue
       
       paths = mergeEnds(paths, midpoint)
@@ -198,7 +177,7 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
 
       tripleArray = np.array(triple)
 
-      updatePath(layer, paths, idx[tripleArray],"wedge"+str(wedgeNrOffset))
+      updatePath(layer, paths, idx[],"wedge"+str(wedgeNrOffset))
       unUsedCurves[tripleArray] = 0
       maxCurveDist = max(np.max(dist[triple,:][:,triple]), maxCurveDist)
       wedgeNrOffset = wedgeNrOffset+1
