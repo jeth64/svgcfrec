@@ -1,13 +1,15 @@
-import sys, optparse, time
-import xml.etree.ElementTree as et
-import re
 import numpy as np
+from sys                    import exit
+from time                   import time, asctime
+from optparse               import OptionParser, TitledHelpFormatter
+from xml.etree.ElementTree  import parse
+from re                     import finditer, split, match
 from scipy.spatial.distance import pdist, squareform, cdist
-import collections as col
-from itertools import combinations, permutations, groupby, chain, product, repeat
-import warnings
-from scipy.misc import comb
-import operator
+from collections            import Counter
+from itertools              import combinations, groupby, product, repeat
+from scipy.misc             import comb
+from operator               import add
+
 
 def cubicBezier(points, t):
    xPoints = np.array([p[0] for p in points])
@@ -103,7 +105,7 @@ Determine of which curves the indices have to be flipped
 for melting the paths into one
 """
 def flipCurves(paths):
-   func = lambda p: reduce(operator.add,[np.linalg.norm(p[k-1][3,:]-p[k][0,:]) for k in range(len(p))])
+   func = lambda p: reduce(add,[np.linalg.norm(p[k-1][3,:]-p[k][0,:]) for k in range(len(p))])
    possibilities = map(lambda x: map(lambda a, b, c: b if a else c, x, paths, paths[:,::-1,:]), product([True, False], repeat=3))
    return np.array(min(possibilities, key=func))
 
@@ -129,7 +131,8 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
 
       paths = mergeEnds(paths, midpoint)
       
-      if options.extension: findExtension(paths,lines,midpoint)
+      if options.extension:
+         findExtension(paths,lines[lineidx],midpoint)
 
       tripleArray = np.array(triple)
 
@@ -143,12 +146,12 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
    return wedgeNrOffset, idx, maxCurveDist
 
 def getPoints(pathstring):
-   it = re.finditer('([MmCcSsLl])([^A-DF-Za-df-z]+)',pathstring.replace("-"," -").replace("e -", "e-"))
+   it = finditer('([MmCcSsLl])([^A-DF-Za-df-z]+)',pathstring.replace("-"," -").replace("e -", "e-"))
    cOffset = [0.0,0.0]
    points = []
    for m in it:
       char = m.group(1)
-      pts = filter(lambda x: len(x)!=0, re.split(' |,', m.group(2).strip()))
+      pts = filter(lambda x: len(x)!=0, split(' |,', m.group(2).strip()))
       if char == "M":
          if len(pts)%2 != 0: return np.array([])
          cOffset = [float(pts[0]),float(pts[1])]
@@ -300,7 +303,7 @@ def thinOut(points):
 
 def transform(points, transformation):
    if transformation == None: return points
-   m = re.match(r"(?P<method>\w+)\(\s*(?P<args>[^)]*)\)", transformation)
+   m = match(r"(?P<method>\w+)\(\s*(?P<args>[^)]*)\)", transformation)
    args = m.group('args').replace(",", " ").split()
    if m.group('method') == "translate" and (len(args) < 3 or len(args) > 0):
       points[:,0] = points[:,0] + np.float(args[0])
@@ -474,7 +477,7 @@ def update(layer):
       if options.verbose:
          print "\nNo suitable curves found in layer", options.layerID
          print "Program aborting..."
-      sys.exit(0)
+      exit(0)
 
    if options.verbose: print "\nExecuting first strategy..."
    dist = squareform(pdist(refPoints))
@@ -491,7 +494,7 @@ def update(layer):
       # group of three including itself is found)
       # note: cast to "tuple" makes the entries hashable as required
       closest = np.argsort(dist[idx,:][:,idx])
-      count = col.Counter([tuple(x) for x in np.sort(closest[:,:3])])
+      count = Counter([tuple(x) for x in np.sort(closest[:,:3])])
       cuneiforms = [k for (k, v) in count.items() if v==3]
       cfnr, idx, maxD = catPaths(absPoints, endSlopes, refPoints, cuneiforms, idx, cfnr, dist, lines)
 
@@ -544,8 +547,8 @@ if __name__ == '__main__':
     floatType = np.float32
     
     try:
-        start_time = time.time()
-        parser = optparse.OptionParser(formatter=optparse.TitledHelpFormatter(), usage=globals()['__doc__'], version='$Id$')
+        start_time = time()
+        parser = OptionParser(formatter=TitledHelpFormatter(), usage=globals()['__doc__'], version='$Id$')
         parser.add_option ('-v', '--verbose', action='store_true', default=False, help='verbose output')
         parser.add_option ('-p', '--polybezier', action='store_true', default=False, help='include polybeziers (find best fit)')
         parser.add_option ('-e', '--extension', action='store_true', default=False, help='consider lines for wedge extensions')
@@ -572,20 +575,19 @@ if __name__ == '__main__':
         mDist = float(options.maxCurveDist)
         pathAttributes = {"fill":"none", "stroke": options.strokecolor, "stroke-width": options.strokewidth} 
         
-        if options.verbose: print time.asctime()
+        if options.verbose: print asctime()
         if len(args) < 1:
             print "No input file given"
-            sys.exit(0)
+            exit(0)
 
         if options.verbose: print "\nInput: ", args[0]
 
-        tree = et.parse(args[0])
-        root = tree.getroot()
-        layer = root.find(".//*[@id='"+options.layerID+"']")
+        tree = parse(args[0])
+        layer = tree.getroot().find(".//*[@id='"+options.layerID+"']")
         if layer == None:
             print "No layer with id='"+options.layerID+"' found"
             print "Program aborting..."
-            sys.exit(0)
+            exit(0)
 
         if options.debug: debug(layer)
         else: update(layer)
@@ -593,10 +595,10 @@ if __name__ == '__main__':
         if options.verbose: print "Writing result to: ", options.outputfile, "\n"
         tree.write(options.outputfile)
 
-        if options.verbose: print time.asctime()
+        if options.verbose: print asctime()
         if options.verbose: print 'TOTAL TIME IN SECONDS:',
-        if options.verbose: print (time.time() - start_time)
-        sys.exit(0)
+        if options.verbose: print (time() - start_time)
+        exit(0)
     except KeyboardInterrupt, e:
         raise e
     except SystemExit, e:
