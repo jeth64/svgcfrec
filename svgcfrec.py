@@ -3,13 +3,9 @@ import xml.etree.ElementTree as et
 import re
 import numpy as np
 from scipy.spatial.distance import pdist, squareform, cdist
-from scipy.optimize import minimize
 import collections as col
-from itertools import combinations, imap, ifilter, permutations, takewhile, dropwhile, groupby, chain, product
-import itertools
-from pylab import plot,show
+from itertools import combinations, permutations, groupby, chain, product, repeat
 import warnings
-from scipy.cluster.vq import vq, kmeans, whiten
 from scipy.misc import comb
 import operator
 
@@ -22,45 +18,26 @@ def cubicBezier(points, t):
    return np.column_stack((xvals,yvals))
 
 def getReferencePoint(points):
-	average = np.mean(points[:,1:3,:],axis=1)
-	try:
-		# get intersection of lines defined by
-		# - point 0 and 1 and
-		# - point 2 and 3 respectively:
-		A = np.vstack((points[1]-points[0], points[2]-points[3])).T
-		x = np.linalg.solve(A,(points[2]-points[0]).T)
-		intersection = points[0] + x[0] * points[1]
-		pathlength = reduce(lambda x,y: x + np.linalg.norm(y), points[:,0:3,:] - points[:,1:4,:], 0.0)
-		if np.linalg.norm(intersection - average) > pathlength:
-			refPoint = average
-		else:
-			refPoint = intersection
-	except np.linalg.LinAlgError: # when lines are parallel
-		refPoint = average
-	return refPoint
-
-
-def getAngle(v1,v2):
-   # return angle between vector v1 and vector v2
-   np.seterr(invalid='ignore')
-   nominator = np.linalg.norm(v1,2)*np.linalg.norm(v2,2)
-   if nominator <1e-7: return 0.0
-   res = np.arccos(np.dot(v1,v2)/nominator)
-   if np.isnan(res) or np.isinf(res):
-      return 0.0
-   else:
-      return res
-
-
-def angleTooWide(angle,allowedAngle):
-   # determine if an angle is too wide
-   return abs(abs(angle)-(np.pi/2)) < (np.pi/2)-allowedAngle
-   #return abs(angle-(np.pi/2)) < (np.pi/2)-allowedAngle
+   average = np.mean(points,axis=0)
+   try:
+      # get intersection of lines defined by
+      # - point 0 and 1 and
+      # - point 2 and 3 respectively:
+      A = np.vstack((points[1]-points[0], points[2]-points[3])).T
+      x = np.linalg.solve(A,(points[2]-points[0]).T)
+      intersection = points[0] + x[0] * (points[1]-points[0])
+      pathlength = reduce(lambda x,y: x + np.linalg.norm(y), points[0:3,:] -points[1:4,:], 0.0)
+      if np.linalg.norm(intersection - average) > pathlength:
+         refPoint = average
+      else:
+         refPoint = intersection
+   except np.linalg.LinAlgError: # when lines are parallel
+      refPoint = average
+   return refPoint
 
 
 """
-Update element tree: delete old curves and create new node with
-concatenated curve
+Update element tree: delete old curves and create new node with concatenated curve
 """
 def updatePath(layer, paths, curveNumbers, groupID):
    # determine new path for curve
@@ -78,9 +55,10 @@ def updatePath(layer, paths, curveNumbers, groupID):
    cf = et.SubElement(layer, "ns0:g", attrib={"id":"gshhrah"})
    newel = et.SubElement(cf, "ns0:path", attrib=pathAttributes)
 
-   #for curvenr in curveNumbers:
-    #  g = layer.find(".//*[@curvenr='"+str(curvenr)+"']")
-    #  layer.remove(g)
+   if options.delete:
+      for curvenr in curveNumbers:
+         g = layer.find(".//*[@curvenr='"+str(curvenr)+"']")
+         layer.remove(g)
    return True
 
 def curveLineIntersections(bezier, line):
@@ -95,31 +73,19 @@ def curveLineIntersections(bezier, line):
    ts = [x.real for x in np.roots([A,B,C,D]) if x.imag<1e-8]
    return np.column_stack((np.polyval([a[0],b[0],c[0],d[0]], ts),np.polyval([a[1],b[1],c[1],d[1]], ts)))
 
-def numMergingEnds(flippedPaths, gapSize):
-   merging = []
-   lines = flippedPaths[:,::3,:]
-   for i in range(len(flippedPaths)):
-      merging.append(min([np.linalg.norm(x-lines[i-1,1,:]) for x in curveLineIntersections(flippedPaths[i,:,:],lines[i-1,:,:])] \
-                     + [np.linalg.norm(x-lines[i,0,:]) for x in curveLineIntersections(flippedPaths[i-1,:,:],lines[i,:,:])]) \
-                     < gapSize)
-   return len(filter(lambda x: x, merging))
-
-def validOld(flippedPaths, gapSize):
+def valid(flippedPaths, gapSize):
    lines = flippedPaths[:,::3,:]
    for i in range(len(flippedPaths)):
       line2isecDists = [np.linalg.norm(x-lines[i-1,1,:]) for x in curveLineIntersections(flippedPaths[i,:,:],lines[i-1,:,:])] \
                         + [np.linalg.norm(x-lines[i,0,:]) for x in curveLineIntersections(flippedPaths[i-1,:,:],lines[i,:,:])]
       if len(line2isecDists) ==0 or min(line2isecDists) > gapSize: return False
    return True
-
-def valid(flippedPaths, gapSize):
-   return numMergingEnds(flippedPaths, gapSize) == 3
-
+   
 def evalLine(start, end, n):
    return np.vstack(map(lambda i: start + (i/(n-1.0))*(end-start),range(n)))
 
 """
-for two adjoining curves from the points where they meet
+For two adjoining curves from the points where they meet
 choose the point further from midpoint
 """
 def mergeEnds(paths, midpoint):
@@ -127,22 +93,13 @@ def mergeEnds(paths, midpoint):
       di = np.linalg.norm(midpoint - paths[i,3,:])
       dj = np.linalg.norm(midpoint - paths[j,0,:])
       if di > dj:
-         if abs(di-dj) > 1.0:
-            curve = np.vstack(map(lambda t: cubicBezier(paths[j],t), np.linspace(1.0, 0.0,10)))
-            line = evalLine(paths[i,3,:],paths[j,0,:],4)
-            paths[j,:,:] = bezierFit(np.vstack((line,curve[1:])))
-         else: 
-            paths[j,0,:] = paths[i,3,:]
+         paths[j,0,:] = paths[i,3,:]
       else:
-         if abs(di-dj) > 1.0:
-            curve = np.vstack(map(lambda t: cubicBezier(paths[i],t), np.linspace(1.0, 0.0,10)))
-            line = evalLine(paths[i,3,:],paths[j,0,:],4)
-            paths[i,:,:] = bezierFit(np.vstack((curve[:-1],line)))
-         else:  paths[i,3,:] = paths[j,0,:]
+         paths[i,3,:] = paths[j,0,:]
    return paths
 
 """
-determine of which curves the indices have to be flipped
+Determine of which curves the indices have to be flipped
 for melting the paths into one
 """
 def flipCurves(paths):
@@ -167,17 +124,16 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
       """
 
       paths = flipCurves(paths)
-      
-      if valid(paths,2.0) == False: continue
-      
+      if valid(paths,gapSize) == False:
+         continue
+
       paths = mergeEnds(paths, midpoint)
       
-      if options.extension:
-         findExtension(paths,lines,midpoint)
+      if options.extension: findExtension(paths,lines,midpoint)
 
       tripleArray = np.array(triple)
 
-      updatePath(layer, paths, idx[],"wedge"+str(wedgeNrOffset))
+      updatePath(layer, paths, idx[tripleArray],"wedge"+str(wedgeNrOffset))
       unUsedCurves[tripleArray] = 0
       maxCurveDist = max(np.max(dist[triple,:][:,triple]), maxCurveDist)
       wedgeNrOffset = wedgeNrOffset+1
@@ -186,8 +142,8 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
    idx = idx[np.squeeze(np.nonzero(unUsedCurves))]
    return wedgeNrOffset, idx, maxCurveDist
 
-def getPoints(pathNode):
-   it = re.finditer('([MmCcSsLl])([^A-DF-Za-df-z]+)',pathNode.get("d").replace("-"," -").replace("e -", "e-"))
+def getPoints(pathstring):
+   it = re.finditer('([MmCcSsLl])([^A-DF-Za-df-z]+)',pathstring.replace("-"," -").replace("e -", "e-"))
    cOffset = [0.0,0.0]
    points = []
    for m in it:
@@ -197,7 +153,7 @@ def getPoints(pathNode):
          if len(pts)%2 != 0: return np.array([])
          cOffset = [float(pts[0]),float(pts[1])]
          points.append(cOffset)
-         for i in range(2, len(points),2):
+         for i in range(2, len(pts),2):
             cOffset = [float(pts[i]),float(pts[i+1])]
             points.append(cOffset)
             points.append(cOffset)
@@ -206,7 +162,7 @@ def getPoints(pathNode):
          if len(pts)%2 != 0: return np.array([])
          cOffset = [float(pts[0]),float(pts[1])]
          points.append(cOffset)
-         for i in range(2,len(points),2):
+         for i in range(2,len(pts),2):
             cOffset = [float(pts[i])+cOffset[0],float(pts[i+1])+cOffset[1]]
             points.append(cOffset)
             points.append(cOffset)
@@ -241,13 +197,14 @@ def getPoints(pathNode):
             else:
                points.append(pt)
                cOffset = pt
-      elif char == "L":
+      elif char == "L": # works? test8
          if len(pts)%2 != 0: return np.array([])
          for i in range(0, len(pts),2):
             cOffset = [float(pts[i]),float(pts[i+1])]
             points.append(cOffset)
             points.append(cOffset)
             points.append(cOffset)
+         
       elif char == "l":
          if len(pts)%2 != 0: return np.array([])
          for i in range(0, len(pts),2):
@@ -255,24 +212,34 @@ def getPoints(pathNode):
             points.append(cOffset)
             points.append(cOffset)
             points.append(cOffset)
-      else: return np.array([])
+      else:
+         if options.verbose: print "\n Unknown character in path string detected"
+         return np.array([])
+
    return np.array(points, dtype=floatType)
 
+def elevation(qbezier):
+   return np.array([qbezier[0],(qbezier[0]+2*qbezier[1])/3, \
+                   (qbezier[2]+2*qbezier[1])/3, qbezier[2]])
+
+                  
 """
-Fit ordered points to a cubic bezier using least squares method
-Takes n*3+1 points, returns 4
+Fit ordered points to a bezier of degree n using least squares method
+Takes k*3+1 points, returns n+1
 """
 def bezierFit(pts):
    pathlengths = [0.0]
    for i in range(len(pts)-1):
       pathlengths.append(pathlengths[i] + np.linalg.norm(pts[i,:]-pts[i+1,:]))
    ts = map(lambda x: x / pathlengths[-1], pathlengths)
-   x0 = np.array(map(lambda t: (1.0-t)**3, ts ))
-   x1 = np.array(map(lambda t: 3*(1.0-t)**2*t, ts ))
-   x2 = np.array(map(lambda t: 3*(1.0-t)*t**2, ts ))
-   x3 = np.array(map(lambda t: t**3, ts ))
-   X = np.column_stack((x0,x1,x2,x3))
-   Cs = np.dot(np.linalg.inv(np.dot(X.T,X)), np.dot(X.T,pts))
+
+   if len(pts) < 4:
+      X = np.array(map(lambda t: [comb(2, i) * t**(i) * (1 - t)**(2-i) for i in range(0, 3)], ts))
+      Cs = elevation(np.dot(np.linalg.inv(np.dot(X.T,X)), np.dot(X.T,pts)))
+
+   else:
+      X = np.array(map(lambda t: [comb(3, i) * t**(i) * (1 - t)**(3-i) for i in range(0, 4)], ts))
+      Cs = np.dot(np.linalg.inv(np.dot(X.T,X)), np.dot(X.T,pts))
    return Cs
 
 def separator(first, last, p, sw):
@@ -290,7 +257,7 @@ def thinOut(points):
       data.extend(cubicBezier(points[i:i+4,:],step))
    data.extend(np.array([points[-1,:]]))
    
-   sw = 0.51
+   sw = float(options.strokewidth) + 0.05
    first = data[0]
    last = data[np.argmax(cdist(data,[first]))]
 
@@ -301,28 +268,34 @@ def thinOut(points):
       order = order + str(k)
       pts.append(np.array(list(l)))
 
-   #sys.exit()
    if order == '02': # line
       p0 = np.mean(pts[0],axis=0)
       p2 = np.mean(pts[1],axis=0)
       controlPoints = np.vstack((p0, p0, p2, p2))
-   if order == '012':
+   elif order == '020': # line
+      p0 = np.mean(np.vstack((pts[0],pts[2])),axis=0)
+      p2 = np.mean(pts[1],axis=0)
+      controlPoints = np.vstack((p0, p0, p2, p2))
+   elif order == '012':
       curve = np.vstack((np.mean(pts[0],axis=0),pts[1], np.mean(pts[2],axis=0)))
       controlPoints = bezierFit(curve)
-   elif order == '0120':
-      curve = np.vstack(np.mean(np.vstack((pts[0],pts[3])),axis=0), pts[1],np.mean(pts[2],axis=0))
+   elif order == '0120': # probably line
+      curve = np.vstack((np.mean(np.vstack((pts[0],pts[3])),axis=0), pts[1],np.mean(pts[2],axis=0)))
       controlPoints = bezierFit(curve)
    elif order == '0121':
-      controlPointsA = bezierFit(np.vstack(pts[0][-1,:], pts[1], pts[2][0,:]))
-      controlPointsB = bezierFit(np.vstack(pts[0][0,:], pts[3][::-1], pts[2][-1,:]))
+      controlPointsA = bezierFit(np.vstack((pts[0][-1,:], pts[1], pts[2][0,:])))
+      controlPointsB = bezierFit(np.vstack((pts[0][0,:], pts[3][::-1], pts[2][-1,:])))
       controlPoints = np.mean([controlPointsA, controlPointsB],axis=0)
-   elif order == '01210':
-      controlPointsA = bezierFit(np.vstack(pts[0][-1,:], pts[1], pts[2][0,:]))
-      controlPointsB = bezierFit(np.vstack(pts[4][0,:], pts[3][::-1], pts[2][-1,:]))
+   elif order == '01210' or order == '0121010':
+      controlPointsA = bezierFit(np.vstack((pts[0][-1,:], pts[1], pts[2][0,:])))
+      controlPointsB = bezierFit(np.vstack((pts[4][0,:], pts[3][::-1], pts[2][-1,:])))
       controlPoints = np.mean([controlPointsA, controlPointsB],axis=0)
+   elif order == '0210': # probably line
+      curve = np.vstack((np.mean(np.vstack((pts[0],pts[3])),axis=0), pts[2][::-1], pts[1][-1,:]))
+      controlPoints = bezierFit(curve)
    else:
+      #if options.verbose: print "\n Unknown curve specification detected:", order
       return None
-
    return controlPoints
 
 def transform(points, transformation):
@@ -381,16 +354,16 @@ def getPaths(layer, ns):
       # get points
       path = g.find(".//"+ns+"path")
       if path != None:
-         points = adjust(getPoints(path), g.get("transform"))
-         #print "paths", points
-
+         points = adjust(getPoints(path.get("d")), g.get("transform"))
+         
          if points != None:
 
             # check if the curve is not more like a line
-            pathlength = np.linalg.norm(points[:-1,:]-points[1:,:],2)
+            pathlength = reduce(lambda x,y: x + np.linalg.norm(y), points[0:3,:] -points[1:4,:], 0.0)
+             
             linearDistance = np.linalg.norm(points[0,:]-points[3,:],2)
 
-            if linearDistance < 0.5: # point
+            if linearDistance < float(options.strokewidth): # point
                nonConformCurves = nonConformCurves + 1
             elif abs(pathlength - linearDistance)/linearDistance < lineThreshold:
                lines[linenr] = points[(0,3),:]
@@ -411,7 +384,6 @@ def getPaths(layer, ns):
    # trim to real size
    curves.resize((curvenr,4,2))
    lines.resize((linenr,2,2))
-
    return curves, lines
 
 def updateLine(layer, points, lineNumbers, lineID):
@@ -426,20 +398,28 @@ def updateLine(layer, points, lineNumbers, lineID):
    # create new node for calculated polybezier curve and delete old nodes
    cf = et.SubElement(layer, "ns0:line", attrib=lineAttributes)
 
-   #for linenr in lineNumbers:
-    #  g = layer.find(".//*[@linenr='"+str(linenr)+"']")
-    #  layer.remove(g)
+   if options.delete:
+      for linenr in lineNumbers:
+         g = layer.find(".//*[@linenr='"+str(linenr)+"']")
+         layer.remove(g)
    return
 
 def debug(layer):
    nsPrefix = layer.tag[:layer.tag.find("}")+1]
    curves, lines = getPaths(layer,nsPrefix)
+   refPoints = np.array(map(lambda x: np.vstack((list(repeat(getReferencePoint(x),3)),getReferencePoint(x)+[0.5, 0.0])), curves))
    lines = np.vstack((lines, getLines(layer,nsPrefix,len(lines))))
 
    for nr in range(len(curves)):
       if curves[nr] != None:
          updatePath(layer,[curves[nr]],[nr],"curve"+str(nr))
       else: print "No curves"
+   """
+   for nr in range(len(refPoints)):
+      if curves[nr] != None:
+         updatePath(layer,[refPoints[nr]],[nr],"ref"+str(nr))
+      else: print "No curves"
+   """
 
    for nr in range(len(lines)):
       if lines[nr] != None:
@@ -448,30 +428,29 @@ def debug(layer):
 
    return
 
-def findExtension(paths, lines, midpoint):
-   pathCorners = paths[:,3,:].reshape(len(paths),2)
 
-   #sys.exit()
+def normalize(v):
+    norm=np.linalg.norm(v)
+    if norm==0: return v
+    return v/norm
+
+def findExtension(paths, lines, midpoint): 
+   pathCorners = paths[:,0,:].reshape(len(paths),2)
+   pCornerSlopes = [normalize(paths[:,0,:]-paths[:,1,:]), normalize(paths[range(-1,2),3,:]-paths[range(-1,2),2,:])]
    lineEdges = lines.reshape((len(lines)*2,2))
-   #print paths
    (pCorner,lEdge) = np.where(cdist(pathCorners,lineEdges) < extensionDist)
 
-   print paths
-   print pathCorners
    for i in range(len(pCorner)):
-      start = lEdge[i]%2
-      angle = getAngle( midpoint - lines[lEdge[i]/2,1-start,:],
-                        midpoint - paths[pCorner[i],3,:]   )
-      if angle > extensionAngle:
-         #print "angle:", angle, extensionAngle
-         #print getAngle([1,0],[0,1])
-         return paths
+      lStart = lines[lEdge[i]/2,lEdge[i]%2,:]
+      lEnd = lines[lEdge[i]/2,1-lEdge[i]%2,:]
+      dirvec = normalize(lEnd-lStart)
+      angle = np.dot( normalize(np.mean([pCornerSlopes[1][pCorner[i]],pCornerSlopes[0][pCorner[i]]],axis=0)), dirvec)
 
-      paths[pCorner[i],3,:] = lines[lEdge[i]/2,1-lEdge[i]%2,:]
-      paths[pCorner[i]-2,0,:] = paths[pCorner[i],3,:]
-   #print paths
-   #sys.exit()
+      if cosExtensionAngle < angle:
+         paths[pCorner[i]-1,3,:] = lines[lEdge[i]/2,1-lEdge[i]%2,:]
+         paths[pCorner[i],0,:] = paths[pCorner[i]-1,3,:]
    return paths
+
 
 """
 Calculate the distances from the reference points to each other, find groups
@@ -486,17 +465,11 @@ def update(layer):
    nCurves = len(absPoints)
 
    # get reference point and derivatives at end points for curve
-   #endSlopes = np.empty([nCurves,2,2],dtype=floatType)
    endSlopes = np.dstack(( absPoints[:,1,:] - absPoints[:,0,:], \
                            absPoints[:,2,:] - absPoints[:,3,:]  ))
 
-   #print absPoints, endSlopes, endSlopes.shape
+   refPoints = np.array(map(getReferencePoint, absPoints))
 
-   #refPoints = np.mean(absPoints[:,1:3,:], axis=1)
-   refPoints = getReferencePoint(absPoints)
-
-   #print absPoints[0], refPoints[0], endSlopes[0]
-   #print absPoints.shape, refPoints.shape, endSlopes.shape
    if nCurves == 0:
       if options.verbose:
          print "\nNo suitable curves found in layer", options.layerID
@@ -520,66 +493,31 @@ def update(layer):
       closest = np.argsort(dist[idx,:][:,idx])
       count = col.Counter([tuple(x) for x in np.sort(closest[:,:3])])
       cuneiforms = [k for (k, v) in count.items() if v==3]
-		# note: versuche alle tripel zu testen (itertools.combinations)
-      #print len(cuneiforms)
       cfnr, idx, maxD = catPaths(absPoints, endSlopes, refPoints, cuneiforms, idx, cfnr, dist, lines)
 
       if cfnrOld != cfnr:
-         if options.verbose: print cfnr, "cuneiforms found after run", run
+         if options.verbose: print cfnr, "wedges found after run", run
          run = run + 1
-         print run, maxCurveDist
          maxCurveDist = max(maxCurveDist,maxD)
-         
-         print maxCurveDist
-         #sys.exit()
          cfnrOld = cfnr
       else: break
-      #sys.exit()
 
    if options.verbose:
       print "\n", len(idx), "curves left"
       print "\nExecuting second strategy..."
 
-
+   
    # look for pairs of curves which are not further away from each other than
    # the pairs in the cuneiforms already found
 
-   #"""
-   dnew = dist[idx,:][:,idx]
-   #print maxCurveDist
-   #sys.exit()
+   if maxCurveDist > mDist: maxCurveDist= mDist
+
    closePoints = filter(lambda x: x[0]<x[1], np.array(np.where(dist[idx,:][:,idx] < maxCurveDist)).T)
-   #print closePoints[:10]
-   #print dist[idx,:][:,idx]
-   #print set(map(tuple, chain(map(lambda i: combinations([j for j in idx if dist[i,j]< maxCurveDist],3),idx))))[:50]
-   closest = np.argsort(dist[idx,:][:,idx])
-   #print col.Counter([tuple(x) for x in chain(map(lambda i: combinations([j for j in idx if  j>=i and dist[i,j]< 10],3),idx))])
-   #print list(reduce(operator.add, (map(lambda i: map(list, combinations([j for j in idx if  j>=i and dist[i,j]< 10],3)),idx))))
-   #sys.exit()
-   
-   #print maxCurveDist, len(closePoints)
+
    k=0
    pairings = [[] for i in range(len(idx))]
    for pair in closePoints:
       paths = absPoints[idx[pair,:],:,:]
-      midpoint = np.mean(refPoints[idx[pair,:],:],axis=0)
-      slope = paths[:,::3,:]-midpoint
-
-      c = np.empty((2,2))
-      c[0,0] = getAngle(slope[0][1],slope[1][0])
-      c[0,1] = getAngle(slope[0][1],slope[1][1])
-      c[1,0] = getAngle(slope[0][0],slope[1][0])
-      c[1,1] = getAngle(slope[0][0],slope[1][1])
-
-      
-      #print paths
-
-      flip = np.unravel_index(np.argmin(c),c.shape)
-
-      if angleTooWide(np.min(c),1.0): continue
-
-      
-
       k = k+1
       pairings[pair[0]].append(pair[1])
 
@@ -588,47 +526,56 @@ def update(layer):
    for k in range(len(idx)):
       if len(pairings[k]) > 1:
          for (i,j) in combinations(pairings[k],2):
-            if j in pairings[i] and \
-               k not in used and \
-               i not in used and \
-               j not in used:
-
+            if j in pairings[i] and k not in used and i not in used and j not in used:
                triple = (k,i,j)
-               triples.append(triple)
-               used.add(k)
-               used.add(i)
-               used.add(j)
-   print len(triples)/3
 
+               if valid(flipCurves(absPoints[triple,:,:]),gapSize):
+                  triples.append(triple)
+                  used.add(k)
+                  used.add(i)
+                  used.add(j)
+   
    cfnr, idx, maxD = catPaths(absPoints, endSlopes, refPoints, triples, idx, cfnr, dist, lines)
-   #"""
-   if options.verbose: print cfnr, "cuneiforms found in total\n"
+
+   if options.verbose: print cfnr, "wedges found in total\n"
 
 if __name__ == '__main__':
-    pathAttributes = {"fill":"none", "stroke": "blue", "stroke-width": "0.5"} #"d":"",
     lineAttributes = {"fill":"none", "stroke": "yellow", "stroke-width": "0.5"}
     floatType = np.float32
-    allowedAngle = np.pi/3 # 5 #10
-    lineThreshold = 1e-7
-    extensionAngle = np.pi/15
-    extensionDist = 1
-    pts = np.array([[259.251, 290.61199999999997], [261.334, 284.778], [264.001, 280.61199999999997], [265.084, 278.86199999999997], [266.417, 277.27799999999996]])
-    #print bezierFit(pts, np.array([254.167, 292.445]), np.array([268.001, 276.11199999999997]))
-    #sys.exit()
+    
     try:
         start_time = time.time()
         parser = optparse.OptionParser(formatter=optparse.TitledHelpFormatter(), usage=globals()['__doc__'], version='$Id$')
         parser.add_option ('-v', '--verbose', action='store_true', default=False, help='verbose output')
-        parser.add_option ('-p', '--polybezier', action='store_true', default=False, help='Include polybeziers (find best fit)')
-        parser.add_option ('-e', '--extension', action='store_true', default=False, help='Consider lines for wedge extensions')
+        parser.add_option ('-p', '--polybezier', action='store_true', default=False, help='include polybeziers (find best fit)')
+        parser.add_option ('-e', '--extension', action='store_true', default=False, help='consider lines for wedge extensions')
         parser.add_option ('-o', '--ofile', metavar="FILE", action='store', default="out.svg", help='output file', dest="outputfile")
         parser.add_option ('-l', '--layerid', metavar="ID", action='store', default="cuneiforms", help='layer ID', dest="layerID")
+        parser.add_option ('-g', '--gapsize', metavar="SIZE", action='store', default=2.0, help='allowed gap between end point of of curve and intersection of curves', dest="gapSize")
+        parser.add_option ('-t', '--linethreshold', metavar="THRESHOLD", action='store', default=1e-7, help='maximum distance of points to fitted line to be classified as such', dest="lineThreshold")
+        parser.add_option ('-a', '--extangle', metavar="ANGLE", action='store', default=np.pi/5, help='maximum angle between extending line and direction vector of corner', dest="extAngle")
+        parser.add_option ('-d', '--extDIST', metavar="DIST", action='store', default=1.0, help='distance between corner and line end', dest="extDist")
+        parser.add_option ('-m', '--maxDist', metavar="DIST", action='store', default=1000.0, help='upper limit of the distance between reference points of the curves of a wedge', dest="maxCurveDist")
+        
+        parser.add_option ('-s', '--strokewidth', metavar="WIDTH", action='store', default="0.5", help='stroke-width of paths', dest="strokewidth")
+        parser.add_option ('-c', '--strokecolor', metavar="COLOR", action='store', default="blue", help='stroke-color of paths', dest="strokecolor")
+
+        parser.add_option ('', '--debug', action='store_true', default=False, help='only preparatory functions are executed; outfile contains detected curves and lines')
+        parser.add_option ('', '--delete', action='store_true', default=False, help='delete original curves from document')
+        
         (options, args) = parser.parse_args()
+        
+        gapSize = float(options.gapSize)
+        cosExtensionAngle = np.cos(float(options.extAngle))
+        extensionDist = float(options.extDist)
+        lineThreshold = float(options.lineThreshold)
+        mDist = float(options.maxCurveDist)
+        pathAttributes = {"fill":"none", "stroke": options.strokecolor, "stroke-width": options.strokewidth} 
+        
         if options.verbose: print time.asctime()
         if len(args) < 1:
-            #print "No input file given"
-            #sys.exit(0)
-            args.append("test/test3.svg")
+            print "No input file given"
+            sys.exit(0)
 
         if options.verbose: print "\nInput: ", args[0]
 
@@ -640,8 +587,8 @@ if __name__ == '__main__':
             print "Program aborting..."
             sys.exit(0)
 
-        #debug(layer)
-        update(layer)
+        if options.debug: debug(layer)
+        else: update(layer)
 
         if options.verbose: print "Writing result to: ", options.outputfile, "\n"
         tree.write(options.outputfile)
@@ -656,13 +603,37 @@ if __name__ == '__main__':
         raise e
 
 """
+1)
 python svgcfrec.py VAT_10908_Vs.svg -v -l Kopie
-python svgcfrec.py VAT_10321_Vs_SJakob.svg -v -l Autographie -p
-python svgcfrec.py VAT_09671_Rs_SJakob.svg -v -l Autographie -p
-python svgcfrec.py VAT_09898+10964_Vs_SJakob.svg -v -l Autographie
-python svgcfrec.py VAT_10321_Vs_SJakob.svg -v -l Autographie
-python svgcfrec.py VAT_11022_SJakob.svg -v -l Autographie
-python svgcfrec.py VAT_10622_HPSchaudig.svg -v -l g20
-python svgcfrec.py VAT_10686+Obv_HPSchaudig.svg -v -l g20
-python svgcfrec.py VAT_10833-SeiteB_HPSchaudig.svg -v -l g20
+395 found, 3 missing, 11 half
+2)
+python svgcfrec.py VAT_10321_Vs_SJakob.svg -v -l Autographie -p -a 0.7 -e
+385 found 16 missing 2wrong 5 half 20 lines not detected 440 lines detected + 8 wrong doppelt
+3)
+python svgcfrec.py VAT_09671_Rs_SJakob.svg -v -l Autographie -p -e
+851 found, davon 6 falsch, 33 missing, 10 halb; 24 not detected, 875-57-34=784 lines d. +6 wrong (5 doppelt)
+4)
+python svgcfrec.py VAT_09671_Rs_SJakob.svg -v -l Autographie_Rand -p -e
+6 found, 0 wrong, 2 missing, 2 half, 1 line not detected, 3 detected 0 wrong
+5)
+python svgcfrec.py VAT_09898+10964_Vs_SJakob.svg -v -l Autographie -p -e
+715 found, 16 missing, 16 half, 7 lines not detected, 715-25-8-14=668  d.,6 wrong (5 doppelt)
+6)
+python svgcfrec.py VAT_09898+10964_Vs_SJakob.svg -v -l Autographie_09898 -p -e
+1213 found, 5 wrong, 48 missing, 26 half, 23 lines not detected 1223-23-42 = 1158 d. 4 wrong(3 doppelt)
+7)
+python svgcfrec.py VAT_11022_SJakob.svg -v -l Autographie -p -e
+418 found, 3 wrong, 11 missing, 13 half, 14 lines not detected, 424-36-14=384 lines d., 4 wrong (all double)
+8)
+python svgcfrec.py VAT_10622_HPSchaudig.svg -v -l g20 -p -e -t 0.001
+309 found, 1 wrong, 0 missing, 2 half, 1l not d., 319-9=310 lines d. 3 wrong (alle doppelt)
+9)
+python svgcfrec.py VAT_10686+Obv_HPSchaudig.svg -v -l g8902 -p -e
+167 found, 5 missing, 0 wrong, 2 half, 10 not detected, 157-21=136 lines d. 0 wrong
+10)
+python svgcfrec.py VAT_10686+Obv_HPSchaudig.svg -v -l g74 -p -e -t 0.001
+521 found, 13 missing, 3 half, 6 not d., 538-34=504 lines d. 0 wrong
+11)
+python svgcfrec.py VAT_10833-SeiteB_HPSchaudig.svg -v -l g20 -p -e -t 0.001
+241 found, 1 missing, 1 wrong, 6 halb, 6 not d., 240-10 lines detected, 0 wrong
 """
