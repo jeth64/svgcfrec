@@ -2,7 +2,7 @@ import numpy as np
 from sys                    import exit
 from time                   import time, asctime
 from optparse               import OptionParser, TitledHelpFormatter
-from xml.etree.ElementTree  import parse
+from xml.etree.ElementTree  import parse, SubElement
 from re                     import finditer, split, match
 from scipy.spatial.distance import pdist, squareform, cdist
 from collections            import Counter
@@ -41,7 +41,7 @@ def getReferencePoint(points):
 """
 Update element tree: delete old curves and create new node with concatenated curve
 """
-def updatePath(layer, paths, curveNumbers, groupID):
+def updatePath(layer, paths, curveNumbers, lineNumbers, groupID):
    # determine new path for curve
    paths = np.around(paths,decimals=3)
    anker = paths[0,0,:]
@@ -54,13 +54,16 @@ def updatePath(layer, paths, curveNumbers, groupID):
    pathAttributes["d"] = newPath
 
    # create new node for calculated polybezier curve and delete old nodes
-   cf = et.SubElement(layer, "ns0:g", attrib={"id":"gshhrah"})
-   newel = et.SubElement(cf, "ns0:path", attrib=pathAttributes)
+   cf = SubElement(layer, "ns0:g", attrib={"id":groupID})
+   newel = SubElement(cf, "ns0:path", attrib=pathAttributes)
 
    if options.delete:
-      for curvenr in curveNumbers:
-         g = layer.find(".//*[@curvenr='"+str(curvenr)+"']")
-         layer.remove(g)
+      for nr in curveNumbers:
+         node = layer.find(".//*[@curvenr='"+str(nr)+"']")
+         if node != None: layer.remove(node)
+      for nr in lineNumbers:
+         node = layer.find(".//*[@linenr='"+str(nr)+"']")
+         if node != None: layer.remove(node)
    return True
 
 def curveLineIntersections(bezier, line):
@@ -111,9 +114,10 @@ def flipCurves(paths):
 
 
 def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
-                                    wedgeNrOffset, dist, lines):#, lineidx):
+                                    wedgeNrOffset, dist, lines, lineidx):
    # calculate one path for each group of three paths,
    unUsedCurves = np.ones(len(idx))
+   unUsedLines = np.ones(len(lineidx))
    maxCurveDist = 0
    for triple in triples:
       paths = absPoints[idx[triple,:],:,:]
@@ -132,18 +136,20 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
       paths = mergeEnds(paths, midpoint)
       
       if options.extension:
-         findExtension(paths,lines[lineidx],midpoint)
+         paths, usedLines = findExtension(paths,lines[lineidx],midpoint)
 
       tripleArray = np.array(triple)
 
-      updatePath(layer, paths, idx[tripleArray],"wedge"+str(wedgeNrOffset))
+      updatePath(layer, paths, idx[tripleArray], lineidx[usedLines], "wedge"+str(wedgeNrOffset))
       unUsedCurves[tripleArray] = 0
+      unUsedLines[usedLines] = 0
       maxCurveDist = max(np.max(dist[triple,:][:,triple]), maxCurveDist)
       wedgeNrOffset = wedgeNrOffset+1
 
-   # calculate new index mapping for free curves
+   # calculate new index mapping for free curves and lines
    idx = idx[np.squeeze(np.nonzero(unUsedCurves))]
-   return wedgeNrOffset, idx, maxCurveDist
+   lineidx = lineidx[np.squeeze(np.nonzero(unUsedLines))]
+   return wedgeNrOffset, idx, maxCurveDist, lineidx
 
 def getPoints(pathstring):
    it = finditer('([MmCcSsLl])([^A-DF-Za-df-z]+)',pathstring.replace("-"," -").replace("e -", "e-"))
@@ -336,7 +342,7 @@ def getLines(layer, ns, offset=0):
          lines.append( [[g.get("x1"), g.get("y1")], \
                         [g.get("x2"), g.get("y2")]] )
 
-   if options.verbose:  print len(lines), "lines found"
+   if options.verbose: print " ", len(lines), "lines found"
 
    return np.array(lines,dtype=floatType).reshape((len(lines),2,2))
 
@@ -399,7 +405,7 @@ def updateLine(layer, points, lineNumbers, lineID):
    lineAttributes["id"] = lineID
 
    # create new node for calculated polybezier curve and delete old nodes
-   cf = et.SubElement(layer, "ns0:line", attrib=lineAttributes)
+   cf = et.SubElement(layer, "ns0:line", attrib={"fill":"none", "stroke": "yellow", "stroke-width": "0.5"})
 
    if options.delete:
       for linenr in lineNumbers:
@@ -437,7 +443,8 @@ def normalize(v):
     if norm==0: return v
     return v/norm
 
-def findExtension(paths, lines, midpoint): 
+def findExtension(paths, lines, midpoint):
+   usedLines = []
    pathCorners = paths[:,0,:].reshape(len(paths),2)
    pCornerSlopes = [normalize(paths[:,0,:]-paths[:,1,:]), normalize(paths[range(-1,2),3,:]-paths[range(-1,2),2,:])]
    lineEdges = lines.reshape((len(lines)*2,2))
@@ -452,7 +459,8 @@ def findExtension(paths, lines, midpoint):
       if cosExtensionAngle < angle:
          paths[pCorner[i]-1,3,:] = lines[lEdge[i]/2,1-lEdge[i]%2,:]
          paths[pCorner[i],0,:] = paths[pCorner[i]-1,3,:]
-   return paths
+         usedLines.append(lEdge[i]/2)
+   return paths, usedLines
 
 
 """
@@ -466,6 +474,7 @@ def update(layer):
    lines = np.vstack((lines, getLines(layer,nsPrefix,len(lines))))
 
    nCurves = len(absPoints)
+   nLines = len(lines)
 
    # get reference point and derivatives at end points for curve
    endSlopes = np.dstack(( absPoints[:,1,:] - absPoints[:,0,:], \
@@ -479,13 +488,14 @@ def update(layer):
          print "Program aborting..."
       exit(0)
 
-   if options.verbose: print "\nExecuting first strategy..."
+   if options.verbose: print "\nExecuting first strategy...\n"
    dist = squareform(pdist(refPoints))
    maxCurveDist = 0
 
    cfnrOld = 0
    cfnr = 0
    idx = np.array(range(nCurves))
+   lineidx = np.array(range(nLines))
    run = 1
 
    while True:
@@ -496,7 +506,7 @@ def update(layer):
       closest = np.argsort(dist[idx,:][:,idx])
       count = Counter([tuple(x) for x in np.sort(closest[:,:3])])
       cuneiforms = [k for (k, v) in count.items() if v==3]
-      cfnr, idx, maxD = catPaths(absPoints, endSlopes, refPoints, cuneiforms, idx, cfnr, dist, lines)
+      cfnr, idx, maxD, lineidx = catPaths(absPoints, endSlopes, refPoints, cuneiforms, idx, cfnr, dist, lines, lineidx)
 
       if cfnrOld != cfnr:
          if options.verbose: print cfnr, "wedges found after run", run
@@ -507,7 +517,8 @@ def update(layer):
 
    if options.verbose:
       print "\n", len(idx), "curves left"
-      print "\nExecuting second strategy..."
+      print len(lineidx), "lines left"
+      print "\nExecuting second strategy...\n"
 
    
    # look for pairs of curves which are not further away from each other than
@@ -538,12 +549,11 @@ def update(layer):
                   used.add(i)
                   used.add(j)
    
-   cfnr, idx, maxD = catPaths(absPoints, endSlopes, refPoints, triples, idx, cfnr, dist, lines)
+   cfnr, idx, maxD, lineidx = catPaths(absPoints, endSlopes, refPoints, triples, idx, cfnr, dist, lines, lineidx)
 
    if options.verbose: print cfnr, "wedges found in total\n"
 
 if __name__ == '__main__':
-    lineAttributes = {"fill":"none", "stroke": "yellow", "stroke-width": "0.5"}
     floatType = np.float32
     
     try:
@@ -564,7 +574,7 @@ if __name__ == '__main__':
         parser.add_option ('-c', '--strokecolor', metavar="COLOR", action='store', default="blue", help='stroke-color of paths', dest="strokecolor")
 
         parser.add_option ('', '--debug', action='store_true', default=False, help='only preparatory functions are executed; outfile contains detected curves and lines')
-        parser.add_option ('', '--delete', action='store_true', default=False, help='delete original curves from document')
+        parser.add_option ('', '--delete', action='store_true', default=False, help='delete used original curves from document')
         
         (options, args) = parser.parse_args()
         
@@ -603,39 +613,3 @@ if __name__ == '__main__':
         raise e
     except SystemExit, e:
         raise e
-
-"""
-1)
-python svgcfrec.py VAT_10908_Vs.svg -v -l Kopie
-395 found, 3 missing, 11 half
-2)
-python svgcfrec.py VAT_10321_Vs_SJakob.svg -v -l Autographie -p -a 0.7 -e
-385 found 16 missing 2wrong 5 half 20 lines not detected 440 lines detected + 8 wrong doppelt
-3)
-python svgcfrec.py VAT_09671_Rs_SJakob.svg -v -l Autographie -p -e
-851 found, davon 6 falsch, 33 missing, 10 halb; 24 not detected, 875-57-34=784 lines d. +6 wrong (5 doppelt)
-4)
-python svgcfrec.py VAT_09671_Rs_SJakob.svg -v -l Autographie_Rand -p -e
-6 found, 0 wrong, 2 missing, 2 half, 1 line not detected, 3 detected 0 wrong
-5)
-python svgcfrec.py VAT_09898+10964_Vs_SJakob.svg -v -l Autographie -p -e
-715 found, 16 missing, 16 half, 7 lines not detected, 715-25-8-14=668  d.,6 wrong (5 doppelt)
-6)
-python svgcfrec.py VAT_09898+10964_Vs_SJakob.svg -v -l Autographie_09898 -p -e
-1213 found, 5 wrong, 48 missing, 26 half, 23 lines not detected 1223-23-42 = 1158 d. 4 wrong(3 doppelt)
-7)
-python svgcfrec.py VAT_11022_SJakob.svg -v -l Autographie -p -e
-418 found, 3 wrong, 11 missing, 13 half, 14 lines not detected, 424-36-14=384 lines d., 4 wrong (all double)
-8)
-python svgcfrec.py VAT_10622_HPSchaudig.svg -v -l g20 -p -e -t 0.001
-309 found, 1 wrong, 0 missing, 2 half, 1l not d., 319-9=310 lines d. 3 wrong (alle doppelt)
-9)
-python svgcfrec.py VAT_10686+Obv_HPSchaudig.svg -v -l g8902 -p -e
-167 found, 5 missing, 0 wrong, 2 half, 10 not detected, 157-21=136 lines d. 0 wrong
-10)
-python svgcfrec.py VAT_10686+Obv_HPSchaudig.svg -v -l g74 -p -e -t 0.001
-521 found, 13 missing, 3 half, 6 not d., 538-34=504 lines d. 0 wrong
-11)
-python svgcfrec.py VAT_10833-SeiteB_HPSchaudig.svg -v -l g20 -p -e -t 0.001
-241 found, 1 missing, 1 wrong, 6 halb, 6 not d., 240-10 lines detected, 0 wrong
-"""
