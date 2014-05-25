@@ -112,16 +112,16 @@ def flipCurves(paths):
    possibilities = map(lambda x: map(lambda a, b, c: b if a else c, x, paths, paths[:,::-1,:]), product([True, False], repeat=3))
    return np.array(min(possibilities, key=func))
 
-
-def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
-                                    wedgeNrOffset, dist, lines, lineidx):
+"""
+Calculate a new path node for curve triples if they form a wedge
+"""
+def catPaths(absPoints, refPoints, triples, idx, wedgeNrOffset, dist, lines, lineidx):
    # calculate one path for each group of three paths,
    unUsedCurves = np.ones(len(idx))
    unUsedLines = np.ones(len(lineidx))
    maxCurveDist = 0
    for triple in triples:
       paths = absPoints[idx[triple,:],:,:]
-      dx = endSlopes[idx[triple,:],:]
       midpoint = np.mean(refPoints[idx[triple,:],:],axis=0)
 
       """
@@ -134,7 +134,8 @@ def catPaths(absPoints, endSlopes, refPoints, triples, idx, \
          continue
 
       paths = mergeEnds(paths, midpoint)
-      
+
+      usedLines = []
       if options.extension:
          paths, usedLines = findExtension(paths,lines[lineidx],midpoint)
 
@@ -213,7 +214,6 @@ def getPoints(pathstring):
             points.append(cOffset)
             points.append(cOffset)
             points.append(cOffset)
-         
       elif char == "l":
          if len(pts)%2 != 0: return np.array([])
          for i in range(0, len(pts),2):
@@ -405,7 +405,7 @@ def updateLine(layer, points, lineNumbers, lineID):
    lineAttributes["id"] = lineID
 
    # create new node for calculated polybezier curve and delete old nodes
-   cf = et.SubElement(layer, "ns0:line", attrib={"fill":"none", "stroke": "yellow", "stroke-width": "0.5"})
+   cf = SubElement(layer, "ns0:line", attrib={"fill":"none", "stroke": "yellow", "stroke-width": "0.5"})
 
    if options.delete:
       for linenr in lineNumbers:
@@ -421,7 +421,7 @@ def debug(layer):
 
    for nr in range(len(curves)):
       if curves[nr] != None:
-         updatePath(layer,[curves[nr]],[nr],"curve"+str(nr))
+         updatePath(layer,[curves[nr]],[nr],[],"curve"+str(nr))
       else: print "No curves"
    """
    for nr in range(len(refPoints)):
@@ -476,10 +476,6 @@ def update(layer):
    nCurves = len(absPoints)
    nLines = len(lines)
 
-   # get reference point and derivatives at end points for curve
-   endSlopes = np.dstack(( absPoints[:,1,:] - absPoints[:,0,:], \
-                           absPoints[:,2,:] - absPoints[:,3,:]  ))
-
    refPoints = np.array(map(getReferencePoint, absPoints))
 
    if nCurves == 0:
@@ -506,7 +502,7 @@ def update(layer):
       closest = np.argsort(dist[idx,:][:,idx])
       count = Counter([tuple(x) for x in np.sort(closest[:,:3])])
       cuneiforms = [k for (k, v) in count.items() if v==3]
-      cfnr, idx, maxD, lineidx = catPaths(absPoints, endSlopes, refPoints, cuneiforms, idx, cfnr, dist, lines, lineidx)
+      cfnr, idx, maxD, lineidx = catPaths(absPoints, refPoints, cuneiforms, idx, cfnr, dist, lines, lineidx)
 
       if cfnrOld != cfnr:
          if options.verbose: print cfnr, "wedges found after run", run
@@ -549,7 +545,7 @@ def update(layer):
                   used.add(i)
                   used.add(j)
    
-   cfnr, idx, maxD, lineidx = catPaths(absPoints, endSlopes, refPoints, triples, idx, cfnr, dist, lines, lineidx)
+   cfnr, idx, maxD, lineidx = catPaths(absPoints, refPoints, triples, idx, cfnr, dist, lines, lineidx)
 
    if options.verbose: print cfnr, "wedges found in total\n"
 
